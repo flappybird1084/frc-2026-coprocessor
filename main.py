@@ -27,7 +27,15 @@ def main():
     field_map = load_field_map(MAP_FILE)
     
     # 2. Setup UDP & Detector
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except PermissionError as exc:
+        print(
+            "Warning: UDP socket creation failed due to permissions. "
+            "Continuing without network output."
+        )
+        print(f"Details: {exc}")
     detector = AprilTagDetector()
     detector.addFamily("tag36h11")
     
@@ -36,15 +44,38 @@ def main():
     )
     estimator = AprilTagPoseEstimator(estimator_config)
 
-    cap = cv2.VideoCapture(0)
-    # 2026 Tip: Set high shutter speed/low exposure to stop motion blur
-    cap.set(cv2.CAP_PROP_EXPOSURE, 5) 
+    def open_camera(index=0, retry_seconds=2):
+        video_device = f"/dev/video{index}"
+        if not os.path.exists(video_device):
+            return None
+        cap = cv2.VideoCapture(index)
+        if not cap.isOpened():
+            cap.release()
+            return None
+        # 2026 Tip: Set high shutter speed/low exposure to stop motion blur
+        cap.set(cv2.CAP_PROP_EXPOSURE, 5)
+        return cap
+
+    cap = open_camera(0)
+    if cap is None:
+        print("Camera not detected. Retrying until available...")
 
     print(f"Vision System Online. Tracking {len(field_map)} tags.")
 
     while True:
+        if cap is None:
+            time.sleep(2)
+            cap = open_camera(0)
+            if cap is None:
+                continue
+            print("Camera detected. Resuming capture.")
+
         ret, frame = cap.read()
-        if not ret: break
+        if not ret:
+            cap.release()
+            cap = None
+            print("Camera read failed. Waiting for camera to return...")
+            continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         detections = detector.detect(gray)
@@ -74,7 +105,7 @@ def main():
                 })
 
         # 3. Stream to RoboRIO
-        if packet:
+        if packet and sock is not None:
             message = json.dumps(packet).encode()
             try:
                 sock.sendto(message, (UDP_IP, UDP_PORT))
